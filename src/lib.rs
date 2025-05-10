@@ -233,7 +233,7 @@ pub struct MaskInfo {
 ///     "Lmns" => "Luminosity",
 ///     _ => "Normal",
 ///```
-pub struct BlendMode { }
+pub struct BlendModeDocs { }
 
 #[derive(Clone, Debug, Default)]
 /// Describes a single layer stack entry.
@@ -244,7 +244,7 @@ pub struct LayerInfo {
     pub opacity : f32,
     /// Photoshop has separate "opacity" and "fill" sliders.
     pub fill_opacity : f32,
-    /// Blend mode stored as a string. See [BlendMode].
+    /// Blend mode stored as a string. See [BlendModeDocs].
     pub blend_mode : String,
     /// Global X position of the layer, based on the top left of the canvas. Can be negative. Ignored for groups.
     pub x : i32,
