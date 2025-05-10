@@ -2,7 +2,7 @@
 name = "rawpsd"
 version = "0.1.0"
 edition = "2024"
-license = "CC0"
+license = "CC0-1.0"
 authors = ["Wareya"]
 description = "Minimal Rust PSD reading library"
 repository = "https://github.com/wareya/rawpsd-rs/"
