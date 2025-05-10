@@ -1,12 +1,96 @@
+//! rawpsd is a library that handles loading PSD data into a list of minimally-processed in-memory structs. It does not have any opinions about what features PSD files should or do use, or how to interpret those features. Compressed data is decompressed, and some redundant pieces of data like ascii and unicode names stored together are only returned once instead of twice, but aside from things like that, rawpsd is minimally opinionated and tries to just tell you what the PSD file itself says. For example, strings are left as strings instead of being transformed into enums.
+//!
+//! rawpsd draws a compatibility support line at Photoshop CS6, the last non-subscription version of Photoshop. Features only supported by newer versions are unlikely to be supported.
+//!
+//! rawpsd's docs do not document the entire PSD format, not even its capabilities. You will need to occasionally reference <https://www.adobe.com/devnet-apps/photoshop/fileformatashtml/> and manually poke at PSD files in a hex editor to take full advantage of rawpsd.
+//!
+//! You want [parse_layer_records].
+//!
+//! Example:
+//!
+//!```rs
+//!let mut file = std::fs::File::open("data/test.psd").expect("Failed to open test.psd");
+//!let mut data = Vec::new();
+//!file.read_to_end(&mut data).expect("Failed to read file");
+//!
+//!if let Ok(layers) = parse_layer_records(&data)
+//!{
+//!    for mut layer in layers
+//!    {
+//!        layer.image_data_rgba = vec!();
+//!        println!("{:?}", layer);
+//!    }
+//!}
+//!```
+
 #![allow(clippy::vec_init_then_push)] // wrong problem domain
 #![allow(clippy::manual_range_contains)] // bad idiom
 #![allow(clippy::field_reassign_with_default)] // bad idiom
 #![allow(clippy::manual_repeat_n)] // TODO: need to test that it's not a perf regression to fix
 
-use std::io::Cursor;
-use std::io::Read;
-use std::collections::HashMap;
+#![cfg_attr(not(any(test, feature = "serde_support", feature = "debug_spew")), no_std)]
+extern crate alloc;
+use alloc::string::{String, ToString};
+use alloc::vec;
+use alloc::vec::Vec;
+use alloc::boxed::Box;
+use alloc::format;
 
+#[derive(Clone, Debug, Default)]
+struct SliceCursor<'a>
+{
+    pub (crate) buf : &'a [u8],
+    pub (crate) pos : usize,
+}
+
+impl<'a> SliceCursor<'a>
+{
+    pub (crate) fn new(buf : &'a [u8]) -> Self
+    {
+        Self { buf, pos: 0 }
+    }
+
+    pub (crate) fn position(&self) -> u64 { self.pos as u64 }
+    pub (crate) fn set_position(&mut self, pos : u64) { self.pos = pos as usize }
+    
+    pub (crate) fn read_exact(&mut self, out : &mut [u8]) -> Result<(), String>
+    {
+        let remaining = self.buf.len().saturating_sub(self.pos);
+        if out.len() > remaining
+        {
+            return Err("Unexpeted end of stream".to_string());
+        }
+        out.copy_from_slice(&self.buf[self.pos..self.pos + out.len()]);
+        self.pos += out.len();
+        Ok(())
+    }
+
+    pub (crate) fn read_to_end(&mut self, out : &mut Vec<u8>) -> Result<usize, String>
+    {
+        let remaining = self.buf.len().saturating_sub(self.pos);
+        out.reserve(remaining);
+        out.extend_from_slice(&self.buf[self.pos..]);
+        self.pos = self.buf.len();
+        Ok(remaining)
+    }
+    
+    pub fn take(&mut self, n : u64) -> Self
+    {
+        Self { buf : &self.buf[self.pos..self.pos + n as usize], pos : 0 }
+    }
+    
+    pub fn take_rest(&mut self) -> Self
+    {
+        Self { buf : &self.buf[self.pos..], pos : 0 }
+    }
+     
+}
+
+use alloc::collections::BTreeMap;
+
+/// PSD Class Descriptor object data. Only used by certain PSD features.
+///
+/// Some PSD format features use a dynamic meta-object format instead of feature-specific data encoding; that information is what this type is responsible for holding.
 #[derive(Clone, Debug, Default)]
 pub enum DescItem
 {
@@ -14,15 +98,21 @@ pub enum DescItem
     long(i32),
     #[allow(non_camel_case_types)]
     doub(f64),
+    /// Float that carries unit system metadata. The string specifies the unit system. Examples of unit systems are "#Ang" and "#Pxl".
     UntF(String, f64),
     #[allow(non_camel_case_types)]
     bool(bool),
     TEXT(String),
+    /// rawpsd ran into an error while parsing some subdata inside of this Descriptor: what kind of error?
     Err(String),
+    /// Entire sub-object.
     Objc(Box<Descriptor>),
     #[allow(non_camel_case_types)]
+    /// Enums, which are stringly typed in PSDs.
     _enum(String, String),
+    /// Variable-length list.
     VlLs(Vec<DescItem>),
+    /// Dummy non-data data.
     #[default] Xxx
 }
 
@@ -48,6 +138,9 @@ type Descriptor = (String, Vec<(String, DescItem)>);
 use serde::{Serialize, Deserialize};
 #[cfg(feature = "serde_support")]
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
+/// Metadata about where a mask attached to an object physically is and how to interpret it.
+///
+/// This struct is general purpose enough that you might want to use it in your code directly instead of making a newtype. If you do, and you need to serde it, enable the serde_support feature.
 pub struct MaskInfo {
     pub x : i32,
     pub y : i32,
@@ -61,6 +154,9 @@ pub struct MaskInfo {
 
 #[cfg(not(feature = "serde_support"))]
 #[derive(Clone, Debug, Default)]
+/// Metadata about where a mask attached to an object physically is and how to interpret it.
+///
+/// This struct is general purpose enough that you might want to use it in your code directly instead of making a newtype. If you do, and you need to serde it, enable the serde_support feature.
 pub struct MaskInfo {
     pub x : i32,
     pub y : i32,
@@ -72,76 +168,172 @@ pub struct MaskInfo {
     pub invert : bool,
 }
 
+/// Dummy struct for docs organization.
+///
+/// Normal blend modes:
+/// ```text
+///     "pass" => "Normal", // "Pass through" mode for groups. Does not behave as a normal blend mode. Affects composition pipeline behavior.
+///     "norm" => "Normal",
+///     "diss" => "Dissolve",
+///     "dark" => "Darken",
+///     "mul " => "Multiply",
+///     "idiv" => "Color Burn",
+///     "lbrn" => "Linear Burn",
+///     "dkCl" => "Darken",
+///     "lite" => "Lighten",
+///     "scrn" => "Screen",
+///     "div " => "Color Dodge",
+///     "lddg" => "Add",
+///     "lgCl" => "Lighten",
+///     "over" => "Overlay",
+///     "sLit" => "Soft Light",
+///     "hLit" => "Hard Light",
+///     "vLit" => "Vivid Light",
+///     "lLit" => "Linear Light",
+///     "pLit" => "Pin Light",
+///     "hMix" => "Hard Mix",
+///     "diff" => "Difference",
+///     "smud" => "Exclusion",
+///     "fsub" => "Subtract",
+///     "fdiv" => "Divide",
+///     "hue " => "Hue",
+///     "sat " => "Saturation",
+///     "colr" => "Color",
+///     "lum " => "Luminosity",
+///     _ => "Normal",
+/// ```
+/// Blend modes as found in certain Class Descriptor objects in certain effect/filter-related features:
+/// ```text
+///     "Nrml" => "Normal",
+///     "Dslv" => "Dissolve",
+///     "Drkn" => "Darken",
+///     "Mltp" => "Multiply",
+///     "CBrn" => "Color Burn",
+///     "linearBurn" => "Linear Burn",
+///     "darkerColor" => "Darken",
+///     "Lghn" => "Lighten",
+///     "Scrn" => "Screen",
+///     "CDdg" => "Color Dodge",
+///     "linearDodge" => "Add",
+///     "lighterColor" => "Lighten",
+///     "Ovrl" => "Overlay",
+///     "SftL" => "Soft Light",
+///     "HrdL" => "Hard Light",
+///     "vividLight" => "Vivid Light",
+///     "linearLight" => "Linear Light",
+///     "pinLight" => "Pin Light",
+///     "hardMix" => "Hard Mix",
+///     "Dfrn" => "Difference",
+///     "Xclu" => "Exclusion",
+///     "blendSubtraction" => "Subtract",
+///     "blendDivide" => "Divide",
+///     "H   " => "Hue",
+///     "Strt" => "Saturation",
+///     "Clr " => "Color",
+///     "Lmns" => "Luminosity",
+///     _ => "Normal",
+///```
+pub struct BlendMode { }
+
 #[derive(Clone, Debug, Default)]
+/// Describes a single layer stack entry.
 pub struct LayerInfo {
+    /// Name of the layer.
     pub name : String,
+    /// Normal opacity of the layer.
     pub opacity : f32,
+    /// Photoshop has separate "opacity" and "fill" sliders.
     pub fill_opacity : f32,
+    /// Blend mode stored as a string. See [BlendMode].
     pub blend_mode : String,
+    /// Global X position of the layer, based on the top left of the canvas. Can be negative. Ignored for groups.
     pub x : i32,
+    /// Global Y position of the layer, based on the top left of the canvas. Can be negative. Ignored for groups.
     pub y : i32,
+    /// Layer image data width.
     pub w : u32,
+    /// Layer image data height.
     pub h : u32,
+    /// Number of channels in the image data.
     pub image_channel_count : u16,
+    /// Four channels worth of image data. Can be RGBA or CMYA or other. This is non-planar: a single pixel is 4 consecutive bytes.
     pub image_data_rgba : Vec<u8>,
+    /// The K channel of CMYK image data, if present.
     pub image_data_k : Vec<u8>,
+    /// Whether the second channel of the RGBA data came from the PSD file (true) or was synthesized (false).
     pub image_data_has_g : bool,
+    /// Whether the third channel of the RGBA data came from the PSD file (true) or was synthesized (false).
     pub image_data_has_b : bool,
+    /// Whether the fourth channel of the RGBA data came from the PSD file (true) or was synthesized (false).
     pub image_data_has_a : bool,
+    /// Number of channels in the mask image data. They are stored planar (all of ch1, then all of ch2, etc), not interleaved like RGBA.
     pub mask_channel_count : u16,
+    /// Where is the mask, and how do you interpret it?
     pub mask_info : MaskInfo,
     //pub global_mask_opacity : u16,
     //pub global_mask_kind : u16,
+    /// Actual mask data. Again, this is planar, unlike RGBA.
     pub image_data_mask : Vec<u8>,
+    /// If this is a group opener, is the group expanded?
     pub group_expanded : bool,
+    /// Is this a group opener?
     pub group_opener : bool,
+    /// Is this a group closer?
     pub group_closer : bool,
+    /// PSD layers have a "transparency shapes layer" flag. This is that flag. It is funny and does weird things to some blend modes.
     pub funny_flag : bool,
+    /// Does this layer have the "clipping mask" flag enabled?
     pub is_clipped : bool,
+    /// Is this layer alpha locked?
     pub is_alpha_locked : bool,
+    /// Is this layer visible?
     pub is_visible : bool,
+    /// Is this an adjustment layer, and if so, what kind?
     pub adjustment_type : String,
+    /// Pile of raw, flattened adjustment layer metadata. See the source code for how each adjustment's data is flattened.
     pub adjustment_info : Vec<f32>,
+    /// Some adjustments use class descriptors instead of "hardcoded" data. Those adjustments get their data here.
     pub adjustment_desc : Option<Descriptor>,
+    /// What effects, if any, does this layer have attached to it?
     pub effects_desc : Option<Descriptor>,
 }
 
-fn read_u8(cursor: &mut Cursor<&[u8]>) -> Result<u8, String>
+fn read_u8(cursor: &mut SliceCursor) -> Result<u8, String>
 {
     let mut buf = [0; 1];
     cursor.read_exact(&mut buf).map_err(|x| x.to_string())?;
     Ok(buf[0])
 }
 
-fn read_u16(cursor: &mut Cursor<&[u8]>) -> Result<u16, String>
+fn read_u16(cursor: &mut SliceCursor) -> Result<u16, String>
 {
     let mut buf = [0; 2];
     cursor.read_exact(&mut buf).map_err(|x| x.to_string())?;
     Ok(u16::from_be_bytes(buf))
 }
 
-fn read_u32(cursor: &mut Cursor<&[u8]>) -> Result<u32, String>
+fn read_u32(cursor: &mut SliceCursor) -> Result<u32, String>
 {
     let mut buf = [0; 4];
     cursor.read_exact(&mut buf).map_err(|x| x.to_string())?;
     Ok(u32::from_be_bytes(buf))
 }
 
-fn read_b4(cursor: &mut Cursor<&[u8]>) -> Result<[u8; 4], String>
+fn read_b4(cursor: &mut SliceCursor) -> Result<[u8; 4], String>
 {
     let mut buf = [0; 4];
     cursor.read_exact(&mut buf).map_err(|x| x.to_string())?;
     Ok(buf)
 }
 
-fn read_i32(cursor: &mut Cursor<&[u8]>) -> Result<i32, String>
+fn read_i32(cursor: &mut SliceCursor) -> Result<i32, String>
 {
     let mut buf = [0; 4];
     cursor.read_exact(&mut buf).map_err(|x| x.to_string())?;
     Ok(i32::from_be_bytes(buf))
 }
 
-fn read_f64(cursor: &mut Cursor<&[u8]>) -> Result<f64, String>
+fn read_f64(cursor: &mut SliceCursor) -> Result<f64, String>
 {
     let mut buf = [0; 8];
     cursor.read_exact(&mut buf).map_err(|x| x.to_string())?;
@@ -151,10 +343,9 @@ fn read_f64(cursor: &mut Cursor<&[u8]>) -> Result<f64, String>
 /// Parses just the frontmost metadata at the start of a PSD file.
 pub fn parse_psd_metadata(data : &[u8]) -> Result<PsdMetadata, String>
 {
-    let mut cursor = Cursor::new(data);
+    let mut cursor = SliceCursor::new(data);
 
-    let mut signature = [0; 4];
-    cursor.read_exact(&mut signature).map_err(|_| "Failed to read PSD signature".to_string())?;
+    let signature = read_b4(&mut cursor)?;
     if signature != [0x38, 0x42, 0x50, 0x53]
     {
         return Err("Invalid PSD signature".to_string());
@@ -183,9 +374,15 @@ pub fn parse_psd_metadata(data : &[u8]) -> Result<PsdMetadata, String>
         color_mode,
     })
 }
+/// Decompress a packbits image data buffer into a vec, appending to the vec.
+///
 /// PSD files generally use compression on their image data. This decompresses it into a vec, bytewise.
-pub fn append_img_data(cursor : &mut Cursor<&[u8]>, output : &mut Vec<u8>, size : u64, h : u64) -> Result<(), String>
+///
+/// Returns the number of bytes read from the slice.
+pub fn append_img_data(cursor : &[u8], output : &mut Vec<u8>, size : u64, h : u64) -> Result<usize, String>
 {
+    let mut _cursor = SliceCursor::new(cursor);
+    let cursor = &mut _cursor;
     //println!("starting at: {:X}\t", cursor.position());
     let mode = read_u16(cursor)?;
     if mode == 0
@@ -211,7 +408,7 @@ pub fn append_img_data(cursor : &mut Cursor<&[u8]>, output : &mut Vec<u8>, size 
                 }
                 else if n != -128
                 {
-                    output.extend(std::iter::repeat(read_u8(&mut c2)?).take((1 - n as i64) as usize));
+                    output.extend(core::iter::repeat(read_u8(&mut c2)?).take((1 - n as i64) as usize));
                 }
             }
         }
@@ -221,11 +418,17 @@ pub fn append_img_data(cursor : &mut Cursor<&[u8]>, output : &mut Vec<u8>, size 
     {
         return Err("unsupported compression format".to_string());
     }
-    Ok(())
+    Ok(cursor.position() as usize)
 }
+/// Decompress a packbits image data buffer into a vec, writing into the vec in-place.
+///
+/// Panics if the vec isn't big enough.
+///
 /// PSD files generally use compression on their image data. This decompresses it into a vec, bytewise.
-pub fn copy_img_data(cursor : &mut Cursor<&[u8]>, output : &mut [u8], stride : usize, size : u64, h : u64) -> Result<(), String>
+pub fn copy_img_data(cursor : &[u8], output : &mut [u8], stride : usize, size : u64, h : u64) -> Result<usize, String>
 {
+    let mut _cursor = SliceCursor::new(cursor);
+    let cursor = &mut _cursor;
     //println!("pos... 0x{:X}", cursor.position());
     let pos = cursor.position();
     let mode = read_u16(cursor)?;
@@ -291,10 +494,11 @@ pub fn copy_img_data(cursor : &mut Cursor<&[u8]>, output : &mut [u8], stride : u
     {
         return Err(format!("unsupported compression format {} at 0x{:X}", mode, pos));
     }
-    cursor.set_position(pos + size);
-    Ok(())
+    Ok(size as usize)
 }
 /// Parses the layer records out of a PSD file, producing a bottom-to-top list.
+///
+/// PSD data is compressed and poorly-ordered, so it's very rare to benefit from streaming loading, even for performance. Therefore, to keep things simple, the input is a slice instead of a streaming trait.
 ///
 /// PSD doesn't store its layer data in a tree; instead, it uses start-of-group and end-of-group nodes in a list to indicate tree structure.
 pub fn parse_layer_records(data : &[u8]) -> Result<Vec<LayerInfo>, String>
@@ -303,7 +507,7 @@ pub fn parse_layer_records(data : &[u8]) -> Result<Vec<LayerInfo>, String>
     assert!(metadata.depth == 8);
     assert!(metadata.color_mode == 3);
     
-    let mut cursor = Cursor::new(data);
+    let mut cursor = SliceCursor::new(data);
     cursor.set_position(26);
 
     let color_mode_length = read_u32(&mut cursor)? as u64;
@@ -324,7 +528,7 @@ pub fn parse_layer_records(data : &[u8]) -> Result<Vec<LayerInfo>, String>
     #[cfg(feature = "debug_spew")]
     println!("starting at {:X}", cursor.position());
     
-    let mut idata_c = Cursor::new(data);
+    let mut idata_c = SliceCursor::new(data);
     idata_c.set_position(cursor.position());
     
     for _i in 0..layer_count
@@ -436,7 +640,8 @@ pub fn parse_layer_records(data : &[u8]) -> Result<Vec<LayerInfo>, String>
                 println!("{} {} {} {}", w, h, pos, channel_length);
                 if channel_length > 2
                 {
-                    copy_img_data(&mut idata_c, &mut image_data_rgba[pos..], 4, channel_length as u64, h as u64)?;
+                    let progress = copy_img_data(idata_c.take_rest().buf, &mut image_data_rgba[pos..], 4, channel_length as u64, h as u64)?;
+                    idata_c.pos += progress;
                 }
                 else
                 {
@@ -447,7 +652,8 @@ pub fn parse_layer_records(data : &[u8]) -> Result<Vec<LayerInfo>, String>
             {
                 if channel_length > 2
                 {
-                    append_img_data(&mut idata_c, &mut image_data_k, channel_length as u64, h as u64)?;
+                    let progress = append_img_data(idata_c.take_rest().buf, &mut image_data_k, channel_length as u64, h as u64)?;
+                    idata_c.pos += progress;
                 }
                 else
                 {
@@ -467,7 +673,8 @@ pub fn parse_layer_records(data : &[u8]) -> Result<Vec<LayerInfo>, String>
                 {
                     #[cfg(feature = "debug_spew")]
                     println!("adding mask data...");
-                    append_img_data(&mut idata_c, &mut image_data_mask, channel_length as u64, mask_info.h as u64)?;
+                    let progress = append_img_data(idata_c.take_rest().buf, &mut image_data_mask, channel_length as u64, mask_info.h as u64)?;
+                    idata_c.pos += progress;
                 }
                 else
                 {
@@ -537,7 +744,7 @@ pub fn parse_layer_records(data : &[u8]) -> Result<Vec<LayerInfo>, String>
             #[cfg(feature = "debug_spew")]
             println!("reading metadata.... {}", name.as_str());
             
-            fn read_descriptor(c : &mut Cursor<&[u8]>) -> Result<Descriptor, String>
+            fn read_descriptor(c : &mut SliceCursor) -> Result<Descriptor, String>
             {
                 // skip name. usually/often blank
                 let n = read_u32(c)? as u64;
@@ -561,7 +768,7 @@ pub fn parse_layer_records(data : &[u8]) -> Result<Vec<LayerInfo>, String>
                     c.read_exact(&mut name).map_err(|x| x.to_string())?;
                     let name = String::from_utf8_lossy(&name).to_string();
                     
-                    fn read_key(c : &mut Cursor<&[u8]>) -> Result<DescItem, String>
+                    fn read_key(c : &mut SliceCursor) -> Result<DescItem, String>
                     {
                         let id = read_b4(c)?;
                         let id = String::from_utf8_lossy(&id).to_string();
@@ -793,7 +1000,7 @@ pub fn parse_layer_records(data : &[u8]) -> Result<Vec<LayerInfo>, String>
                     let temp = read_descriptor(&mut cursor)?.1;
                     #[cfg(feature = "debug_spew")]
                     println!("{:?}", temp);
-                    let mut n = HashMap::new();
+                    let mut n = BTreeMap::new();
                     for t in temp
                     {
                         n.insert(t.0, t.1);
@@ -827,6 +1034,7 @@ pub fn parse_layer_records(data : &[u8]) -> Result<Vec<LayerInfo>, String>
 }
 
 #[derive(Debug, PartialEq)]
+/// File-wide PSD header metadata.
 pub struct PsdMetadata {
     pub width: u32,
     pub height: u32,
@@ -838,9 +1046,11 @@ pub struct PsdMetadata {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Read;
 
     #[test]
-    fn test() {
+    fn test()
+    {
         let mut file = std::fs::File::open("data/test.psd").expect("Failed to open test.psd");
         let mut data = Vec::new();
         file.read_to_end(&mut data).expect("Failed to read file");
