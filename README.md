@@ -1,5 +1,13 @@
 # rawpsd
 
+[![Crates.io](https://img.shields.io/crates/v/rawpsd.svg)](https://crates.io/crates/rawpsd)
+[![Docs.rs](https://docs.rs/rawpsd/badge.svg)](https://docs.rs/rawpsd)
+
+```
+[dependencies]
+rawpsd = "0.2.2"
+```
+
 rawpsd is a library that handles loading PSD data into a list of minimally-processed in-memory structs. It does not have any opinions about what features PSD files should or do use, or how to interpret those features. Compressed data is decompressed, and some redundant pieces of data like ascii and unicode names stored together are only returned once instead of twice, but aside from things like that, rawpsd is minimally opinionated and tries to just tell you what the PSD file itself says. For example, strings are left as strings instead of being transformed into enums.
 
 Comparison with other crates:
