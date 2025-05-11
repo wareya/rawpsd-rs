@@ -15,15 +15,16 @@
 //! Example:
 //!
 //!```rs
-//!let mut file = std::fs::File::open("data/test.psd").expect("Failed to open test.psd");
-//!let mut data = Vec::new();
-//!file.read_to_end(&mut data).expect("Failed to read file");
+//!let data = std::fs::read("data/test.psd").expect("Failed to open test.psd");
 //!
 //!if let Ok(layers) = parse_layer_records(&data)
 //!{
 //!    for mut layer in layers
 //!    {
+//!        // Don't spew tons of image data bytes to stdout; we just want to see the metadata.
 //!        layer.image_data_rgba = vec!();
+//!        layer.image_data_k = vec!();
+//!        layer.image_data_mask = vec!();
 //!        println!("{:?}", layer);
 //!    }
 //!}
