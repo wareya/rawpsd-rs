@@ -159,13 +159,21 @@ use serde::{Serialize, Deserialize};
 /// This struct is general purpose enough that you might want to use it in your code directly instead of making a newtype. If you do, and you need to serde it, enable the `serde_support` feature. The serde format of this struct is not guaranteed to be stable between minor versions or patch versions; if you use the `serde_support` feature and need to ensure compatibility between different builds of your code, pin `rawpsd` to a specific exact version. Otherwise, make a newtype.
 #[non_exhaustive]
 pub struct MaskInfo {
+    /// Mask global X position.
     pub x : i32,
+    /// Mask global Y position.
     pub y : i32,
+    /// Mask image data width.
     pub w : u32,
+    /// Mask image data height.
     pub h : u32,
+    /// Default color of the mask outside of its explicit image area. Must be 0 or 255.
     pub default_color : u8,
+    /// Is the mask flagged as moving along with the layer it's attached to? Does not affect the encoding of the x/y coordinates. I think.
     pub relative : bool,
+    /// Is the mask disabled, i.e. marked as currently having no effect?
     pub disabled : bool,
+    /// Is the mask marked as inverted, i.e. the default color and image data should be treated as being the opposite color (white <-> black)?
     pub invert : bool,
 }
 
@@ -178,13 +186,21 @@ pub struct MaskInfo {
 /// This struct is general purpose enough that you might want to use it in your code directly instead of making a newtype. If you do, and you need to serde it, enable the `serde_support` feature. The serde format of this struct is not guaranteed to be stable between minor versions or patch versions; if you use the `serde_support` feature and need to ensure compatibility between different builds of your code, pin `rawpsd` to a specific exact version. Otherwise, make a newtype.
 #[non_exhaustive]
 pub struct MaskInfo {
+    /// Mask global X position.
     pub x : i32,
+    /// Mask global Y position.
     pub y : i32,
+    /// Mask image data width.
     pub w : u32,
+    /// Mask image data height.
     pub h : u32,
+    /// Default color of the mask outside of its explicit image area. Must be 0 or 255.
     pub default_color : u8,
+    /// Is the mask flagged as moving along with the layer it's attached to? Does not affect the encoding of the x/y coordinates. I think.
     pub relative : bool,
+    /// Is the mask disabled, i.e. marked as currently having no effect?
     pub disabled : bool,
+    /// Is the mask marked as inverted, i.e. the default color and image data should be treated as being the opposite color (white <-> black)?
     pub invert : bool,
 }
 
@@ -461,13 +477,13 @@ pub fn append_img_data(cursor : &[u8], output : &mut Vec<u8>, size : u64, h : u6
     }
     Ok(cursor.position() as usize)
 }
-/// Decompress a packbits image data buffer into a vec, writing into the vec in-place. `stride` can be used to control how far apart to write each byte.
+/// Decompress a packbits image data buffer into a slice, writing into the slice in-place. `stride` can be used to control how far apart to write each byte.
 ///
 /// On success, returns `Ok(size)`.
 ///
-/// Panics if the vec isn't big enough or there isn't enough data.
+/// Panics if the slice isn't big enough or there isn't enough data.
 ///
-/// PSD files generally use compression on their image data. This decompresses it into a vec, bytewise.
+/// PSD files generally use compression on their image data. This decompresses it into a slice, bytewise.
 pub fn copy_img_data(cursor : &[u8], output : &mut [u8], stride : usize, size : u64, h : u64) -> Result<usize, String>
 {
     let mut _cursor = SliceCursor::new(cursor);
